@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import bcrypt
-from jose import JWTError, jwt
+import jwt
 
 from app.core.config import get_settings
 
@@ -53,5 +53,6 @@ def decodificar_token(token: str) -> dict[str, Any] | None:
         return jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
-    except JWTError:
+    except jwt.InvalidTokenError:
+        # Cobre assinatura invalida, expiracao e formato malformado.
         return None

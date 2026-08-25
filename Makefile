@@ -20,7 +20,7 @@ FRONTEND   := frontend
 .DEFAULT_GOAL := help
 .PHONY: help install install-backend install-frontend dev dev-backend \
         dev-frontend db-create db-schema db-reset seed-fake security-check \
-        build lint mysql-start mysql-stop status
+        build lint test check mysql-start mysql-stop status
 
 ## help: mostra esta lista
 help:
@@ -127,6 +127,13 @@ build:
 ## lint: roda o linter do frontend
 lint:
 	@$(ACTIVATE) && cd $(FRONTEND) && npm run lint
+
+## test: roda os testes do backend
+test:
+	@$(ACTIVATE) && cd $(BACKEND) && python -m pytest
+
+## check: testes + lint + verificacao de seguranca
+check: test lint security-check
 
 ## status: mostra o estado do ambiente
 status:

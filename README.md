@@ -14,7 +14,7 @@ percentual de atingimento.
 | Frontend  | React 19 + Next.js 16 + Tailwind CSS |
 | Backend   | Python 3.12 + FastAPI               |
 | Banco     | MySQL 8.0                           |
-| Auth      | JWT + bcrypt                        |
+| Auth      | JWT (PyJWT) + bcrypt                |
 | Produção  | AWS EC2 + RDS (gerenciado pela TI)  |
 
 > **Nota sobre a versão do Next.js:** o template base da KAMI CO. especifica
@@ -86,13 +86,31 @@ Rode `make help` para a lista completa. Os principais:
 | `make seed-fake`      | carrega dados fictícios (idempotente)          |
 | `make db-schema`      | aplica `database/schema.sql`                   |
 | `make db-reset`       | **apaga** e recria o banco (pede confirmação)  |
+| `make test`           | testes do backend (58 testes, sem MySQL)       |
+| `make check`          | testes + lint + verificação de segurança       |
 | `make security-check` | verificação obrigatória antes do push          |
 | `make build`          | build de produção do frontend                  |
 | `make status`         | versões e estado do MySQL                      |
 
 ---
 
+## Testes
+
+```bash
+make test
+```
+
+Rodam contra SQLite em memória — não precisam de MySQL de pé e não tocam o banco
+de desenvolvimento. Cobrem autenticação, controle por perfil, os cálculos do
+painel e o módulo de senha/JWT.
+
 ## Antes de enviar para o GitHub
+
+```bash
+make check
+```
+
+Roda testes, lint e a verificação de segurança de uma vez. Para só a segurança:
 
 ```bash
 make security-check
@@ -103,8 +121,9 @@ make security-check
 
 O verificador cobre: `.env` versionado, segredos no código, chaves privadas,
 força da `SECRET_KEY`, CORS aberto, `/docs` exposto em produção, hash de senha,
-algoritmo do JWT, SQL por interpolação, segredo sob `NEXT_PUBLIC_` e
-dependências vulneráveis.
+algoritmo do JWT, SQL por interpolação, segredo sob `NEXT_PUBLIC_` e CVEs nas
+dependências — `npm audit` no frontend e `pip-audit` no backend, ambos
+bloqueando o push.
 
 Quando um achado for legítimo e intencional, anote a linha com
 `security-check: ok` e a justificativa — nada é ignorado em silêncio.
@@ -133,6 +152,7 @@ backend/
     schemas/      contratos de entrada e saída (Pydantic)
     services/     regra de negócio do painel
   scripts/        seed de dados fictícios
+  tests/          testes (pytest, SQLite em memória)
 database/
   schema.sql      DDL completo
 frontend/

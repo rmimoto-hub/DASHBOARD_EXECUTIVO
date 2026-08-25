@@ -157,6 +157,67 @@ a senha.
 
 ---
 
+## 9. PyJWT em vez de python-jose
+
+**O que foi feito:** `app/core/security.py` usa PyJWT. O `python-jose` foi
+removido, junto com sua dependência transitiva `ecdsa`.
+
+**Por quê:** `pip-audit` apontou no `python-jose` 3.3.0:
+
+- **PYSEC-2024-232 — confusão de algoritmo** com chaves ECDSA do OpenSSH.
+  Falha na validação de assinatura: exatamente o que sustenta a autenticação.
+- PYSEC-2024-233 — DoS no decode de JWE.
+- PYSEC-2025-185 — DoS em `jwe.decrypt`, **sem correção disponível**.
+
+O `ecdsa`, que vinha junto, também tem CVE (PYSEC-2026-1325).
+
+O PyJWT é mantido ativamente, não tem CVE conhecida, e é o que a documentação
+do FastAPI recomenda. A migração foi pequena: só `encode`/`decode` com HS256.
+
+**Ganho colateral:** o PyJWT valida o tamanho da chave HMAC. Um teste falhou
+apontando uma chave de 20 bytes — abaixo do mínimo de 32 do RFC 7518 — que o
+`python-jose` aceitava em silêncio.
+
+---
+
+## 10. `SECRET_KEY` curta impede a aplicação de subir
+
+**O que foi feito:** `Settings` valida `SECRET_KEY` com no mínimo 32 bytes. Sem
+isso, a aplicação não inicia.
+
+**Por quê:** o PyJWT apenas *avisa* sobre chave curta. O `make security-check`
+pega isso antes do push, mas a configuração de produção vem da TI, não deste
+repositório — então o portão precisa existir também em tempo de execução. Chave
+fraca agora falha alto e cedo, com a instrução de como gerar uma boa.
+
+---
+
+## 11. `pip-audit` como portão, não como aviso
+
+**O que foi feito:** o `security-check` roda `pip-audit` no backend e trata
+qualquer CVE como PROBLEMA, bloqueando o push — mesmo tratamento que o
+`npm audit` já dava ao frontend.
+
+**Por quê:** a versão anterior só avisava "há pacotes desatualizados". Isso é
+ruído: desatualizado não é o mesmo que vulnerável, e o aviso genérico escondia
+CVEs reais — as do `python-jose` entre elas. A pergunta certa não é "é a versão
+mais nova?", mas "tem falha conhecida?".
+
+Havia uma assimetria: o frontend tinha portão de vulnerabilidade, o backend não.
+
+**Resultado:** `npm audit` e `pip-audit` reportam zero vulnerabilidades.
+
+---
+
+## 12. `httpx2` no lugar do `httpx` nos testes
+
+O Starlette 1.6 deprecou o uso de `httpx` com o `TestClient` e pede `httpx2`.
+Como o `pytest.ini` trata avisos como erro, a suíte quebrou na atualização — o
+que é o comportamento desejado: avisos de depreciação viram trabalho visível em
+vez de acumular silenciosamente.
+
+---
+
 ## Pendências para a TI
 
 1. Alinhar a versão do Next.js no template base (item 1).

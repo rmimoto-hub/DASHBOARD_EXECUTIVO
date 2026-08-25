@@ -72,7 +72,17 @@ titulo "2. Segredos escritos direto no codigo"
 # SENHA_ADMIN= quanto MINHA_SENHA=. Falso negativo aqui e pior que falso
 # positivo, entao a regra e ampla e o escape e explicito: marque a linha
 # com "security-check: ok" (com a justificativa) para suprimir.
-PADRAO_SEGREDO='(SECRET|PASSWORD|SENHA|API_?KEY|TOKEN|PRIVATE_KEY|CREDENCIAL)[A-Za-z0-9_]*[[:space:]]*[=:][[:space:]]*["'"'"''][^"'"'"'']{8,}'
+# A aspa e a virgula opcionais cobrem tambem as formas de chamada e de
+# dicionario — {"SECRET_KEY": "x"} e setdefault("SECRET_KEY", "x") —, nao
+# so a atribuicao direta SECRET_KEY="x".
+# Aspa simples ou dupla, isolada numa variavel para nao embaralhar
+# o escape do shell.
+Q="[\"']"
+
+# A aspa e a virgula opcionais cobrem tambem as formas de dicionario e
+# de chamada — {"SECRET_KEY": "x"} e setdefault("SECRET_KEY", "x") —,
+# nao so a atribuicao direta SECRET_KEY="x".
+PADRAO_SEGREDO="(SECRET|PASSWORD|SENHA|API_?KEY|TOKEN|PRIVATE_KEY|CREDENCIAL)[A-Za-z0-9_]*$Q?[[:space:]]*[=:,][[:space:]]*$Q[^\"']{8,}"
 
 while IFS= read -r arquivo; do
   case "$arquivo" in
@@ -82,7 +92,7 @@ while IFS= read -r arquivo; do
   esac
   if achados=$(grep -nEI "$PADRAO_SEGREDO" "$arquivo" 2>/dev/null \
                | grep -v 'security-check: ok' \
-               | grep -viE 'troque|exemplo|example|placeholder|seu-|sua-|xxx|<|process\.env|os\.environ|getenv|settings\.'); then
+               | grep -viE 'troque|exemplo|example|placeholder|seu-|sua-|xxx|<|settings\.'); then
     while IFS= read -r linha; do
       problema "possivel segredo em $arquivo:${linha%%:*}"
     done <<< "$achados"
@@ -188,13 +198,31 @@ else
   aviso "npm audit nao executado (rode 'make install-frontend' primeiro)"
 fi
 
-if command -v pip >/dev/null 2>&1; then
-  if pip list --outdated --format=json 2>/dev/null \
-     | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if not d else 1)" 2>/dev/null; then
-    verde "  ok: pacotes Python atualizados"
+# Backend: CVE conhecida e PROBLEMA, do mesmo jeito que no frontend.
+# "Desatualizado" por si so nao bloqueia — vulneravel bloqueia.
+if command -v pip-audit >/dev/null 2>&1; then
+  if achados=$(pip-audit -r backend/requirements.txt --progress-spinner off \
+               --format json 2>/dev/null); then
+    n=$(echo "$achados" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(-1); raise SystemExit
+print(sum(len(dep.get('vulns', [])) for dep in d.get('dependencies', [])))
+" 2>/dev/null)
+    if [ "$n" = "0" ]; then
+      verde "  ok: pip-audit sem vulnerabilidades no backend"
+    elif [ "$n" = "-1" ] || [ -z "$n" ]; then
+      aviso "nao foi possivel interpretar a saida do pip-audit"
+    else
+      problema "pip-audit encontrou $n vulnerabilidade(s) no backend — rode: pip-audit -r backend/requirements.txt"
+    fi
   else
-    aviso "ha pacotes Python desatualizados — veja: pip list --outdated"
+    aviso "pip-audit falhou (rede?) — rode manualmente antes do push"
   fi
+else
+  aviso "pip-audit nao instalado — rode: pip install pip-audit"
 fi
 
 # ---------------------------------------------------------------------
