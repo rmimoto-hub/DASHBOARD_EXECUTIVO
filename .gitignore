@@ -1,0 +1,36 @@
+# Ambiente
+.env
+.env.local
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+.next/
+out/
+
+# macOS
+.DS_Store
+
+# Editores e ferramentas locais
+.vscode/
+.idea/
+.claude/
+
+# Dados e credenciais
+*.sqlite
+*.db
+*.dump
+*.sql.gz
+*.pem
+*.key
+*.p12
+id_rsa*
+
+# Logs
+*.log
