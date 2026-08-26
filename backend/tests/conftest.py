@@ -5,6 +5,7 @@ nao tocam o banco de desenvolvimento.
 """
 import os
 from datetime import date
+from decimal import Decimal
 
 # Definido antes de importar a app: Settings le o ambiente na importacao.
 os.environ.setdefault("DATABASE_URL", "sqlite://")
@@ -24,7 +25,14 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from app.core.database import Base, get_db  # noqa: E402
 from app.core.security import hash_senha  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models.indicador import Indicador, Medicao, MelhorDirecao  # noqa: E402
+from app.models.cadastro import (  # noqa: E402
+    Ciclo,
+    Indicador,
+    MelhorDirecao,
+    Regional,
+    TipoAcumulacao,
+)
+from app.models.fatos import Medicao, Meta  # noqa: E402
 from app.models.usuario import Perfil, Usuario  # noqa: E402
 
 # Senha das fixtures. Existe apenas em SQLite em memoria, destruido ao
@@ -120,40 +128,109 @@ def auth(token):
 
 
 @pytest.fixture
-def indicador_maior(db_session):
-    """Indicador em que maior e melhor, com duas medicoes."""
+def regionais(db_session):
+    """As tres regionais do comite."""
+    registros = [
+        Regional(codigo="SP", nome="Sao Paulo", ordem=1),
+        Regional(codigo="RJ", nome="Rio de Janeiro", ordem=2),
+        Regional(codigo="RS", nome="Rio Grande do Sul", ordem=3),
+    ]
+    db_session.add_all(registros)
+    db_session.commit()
+    for r in registros:
+        db_session.refresh(r)
+    return {r.codigo: r for r in registros}
+
+
+@pytest.fixture
+def ciclo(db_session):
+    """Agosto de 2026, semana 3 de 4 — o ciclo do deck original."""
+    c = Ciclo(
+        ano=2026,
+        mes=8,
+        semanas_total=4,
+        semana_corrente=3,
+        data_fechamento=date(2026, 8, 31),
+    )
+    db_session.add(c)
+    db_session.commit()
+    db_session.refresh(c)
+    return c
+
+
+@pytest.fixture
+def indicador_acumula(db_session):
+    """Faturamento: acumula ao longo do mes, maior e melhor."""
     ind = Indicador(
-        codigo="FAT", nome="Faturamento", unidade="BRL",
-        area="COMERCIAL", melhor_direcao=MelhorDirecao.MAIOR,
+        codigo="FATURAMENTO",
+        nome="Faturamento",
+        area="COMERCIAL",
+        unidade="BRL_MI",
+        tipo_acumulacao=TipoAcumulacao.ACUMULA,
+        melhor_direcao=MelhorDirecao.MAIOR,
+        ordem=1,
     )
     db_session.add(ind)
-    db_session.flush()
-    db_session.add_all([
-        Medicao(indicador_id=ind.id, competencia=date(2026, 6, 1),
-                valor=1000, meta=1200),
-        Medicao(indicador_id=ind.id, competencia=date(2026, 7, 1),
-                valor=1100, meta=1200),
-    ])
     db_session.commit()
     db_session.refresh(ind)
     return ind
 
 
 @pytest.fixture
-def indicador_menor(db_session):
-    """Indicador em que menor e melhor, estourando a meta."""
+def indicador_taxa(db_session):
+    """OTIF: taxa, com numerador e denominador, maior e melhor."""
     ind = Indicador(
-        codigo="INAD", nome="Inadimplencia", unidade="PCT",
-        area="FINANCEIRO", melhor_direcao=MelhorDirecao.MENOR,
+        codigo="OTIF",
+        nome="OTIF",
+        area="OPERACOES",
+        unidade="PCT",
+        tipo_acumulacao=TipoAcumulacao.TAXA,
+        melhor_direcao=MelhorDirecao.MAIOR,
+        rotulo_numerador="pedidos no prazo",
+        rotulo_denominador="pedidos entregues",
+        ordem=1,
     )
     db_session.add(ind)
-    db_session.flush()
-    db_session.add_all([
-        Medicao(indicador_id=ind.id, competencia=date(2026, 6, 1),
-                valor=5, meta=3),
-        Medicao(indicador_id=ind.id, competencia=date(2026, 7, 1),
-                valor=4, meta=3),
-    ])
     db_session.commit()
     db_session.refresh(ind)
     return ind
+
+
+@pytest.fixture
+def lancar(db_session):
+    """Atalho para lancar medicoes: lancar(ind, ciclo, semana, reg, num, den)."""
+
+    def _lancar(indicador, ciclo_, semana, regional, numerador, denominador=None):
+        m = Medicao(
+            indicador_id=indicador.id,
+            ciclo_id=ciclo_.id,
+            semana=semana,
+            regional_id=regional.id,
+            valor_numerador=Decimal(str(numerador)),
+            valor_denominador=(
+                Decimal(str(denominador)) if denominador is not None else None
+            ),
+        )
+        db_session.add(m)
+        db_session.commit()
+        return m
+
+    return _lancar
+
+
+@pytest.fixture
+def definir_meta(db_session):
+    """Atalho para metas: definir_meta(ind, ciclo, valor, regional=None)."""
+
+    def _meta(indicador, ciclo_, valor, regional=None):
+        m = Meta(
+            indicador_id=indicador.id,
+            ciclo_id=ciclo_.id,
+            regional_id=regional.id if regional else None,
+            valor=Decimal(str(valor)),
+        )
+        db_session.add(m)
+        db_session.commit()
+        return m
+
+    return _meta

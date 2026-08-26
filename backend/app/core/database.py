@@ -1,7 +1,7 @@
 """Conexao com o MySQL via SQLAlchemy."""
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import BigInteger, Integer, SmallInteger, create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
@@ -20,6 +20,13 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 class Base(DeclarativeBase):
     pass
+
+
+# O SQLite so autoincrementa INTEGER PRIMARY KEY — uma chave BIGINT vira
+# "NOT NULL constraint failed". A variante mantem BIGINT/SMALLINT no
+# MySQL e usa INTEGER nos testes, que rodam em SQLite.
+Id = BigInteger().with_variant(Integer, "sqlite")
+IdPequeno = SmallInteger().with_variant(Integer, "sqlite")
 
 
 def get_db() -> Generator[Session, None, None]:

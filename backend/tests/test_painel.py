@@ -1,141 +1,296 @@
-"""Calculos do resumo do painel: variacao e atingimento de meta."""
-from datetime import date
-from decimal import Decimal
+"""Montagem do painel a partir do banco: consolidacao, regionais, pauta."""
+from decimal import Decimal as D
 
 import pytest
 
-from app.models.indicador import Indicador, Medicao, MelhorDirecao
-from app.services.painel import _atingimento_pct, _variacao_pct, montar_resumo
-
-# --- variacao ---------------------------------------------------------
-
-
-def test_variacao_positiva():
-    assert _variacao_pct(Decimal("110"), Decimal("100")) == pytest.approx(10)
-
-
-def test_variacao_negativa():
-    assert _variacao_pct(Decimal("90"), Decimal("100")) == pytest.approx(-10)
+from app.models.cadastro import Indicador, MelhorDirecao, TipoAcumulacao
+from app.services.kpi import Semaforo
+from app.services.painel import (
+    montar_painel,
+    montar_pauta,
+    resumir_regionais,
+)
 
 
-def test_variacao_sem_mudanca():
-    assert _variacao_pct(Decimal("100"), Decimal("100")) == 0
+# --- consolidacao vinda do banco --------------------------------------
 
 
-def test_variacao_com_base_zero_e_indefinida():
-    """Dividir por zero nao produz "infinito por cento" na tela."""
-    assert _variacao_pct(Decimal("50"), Decimal("0")) is None
+def test_acumula_soma_semanas_e_regionais(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    """Faturamento do deck: 3 semanas x 3 regionais somam 2,44 mi."""
+    valores = {
+        "SP": [D("0.33"), D("0.30"), D("0.29")],
+        "RJ": [D("0.34"), D("0.28"), D("0.28")],
+        "RS": [D("0.22"), D("0.20"), D("0.20")],
+    }
+    for cod, semanas in valores.items():
+        for i, v in enumerate(semanas, start=1):
+            lancar(indicador_acumula, ciclo, i, regionais[cod], v)
+    definir_meta(indicador_acumula, ciclo, D("3.70"))
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    esperado = sum(sum(v) for v in valores.values())
+    assert linha.valor == esperado
+    assert linha.meta == D("3.70")
+    # 2,44 / 3,70 = 66%
+    assert round(float(linha.atingimento_pct)) == 66
+    assert linha.esperado_pct == D("75")
+    assert linha.semaforo is Semaforo.AMBAR
 
 
-def test_variacao_a_partir_de_base_negativa_usa_modulo():
-    """Prejuizo de -100 para -50 e melhora de 50%, nao de -50%."""
-    assert _variacao_pct(Decimal("-50"), Decimal("-100")) == pytest.approx(50)
+def test_taxa_consolida_ponderada_nao_pela_media(
+    db_session, ciclo, regionais, indicador_taxa, lancar, definir_meta
+):
+    """OTIF do deck: ponderado da 92,3%, media simples daria 89,6%."""
+    # (no prazo, entregues) acumulados do mes, lancados na semana 3
+    lancar(indicador_taxa, ciclo, 3, regionais["SP"], D("706"), D("738"))
+    lancar(indicador_taxa, ciclo, 3, regionais["RJ"], D("316"), D("347"))
+    lancar(indicador_taxa, ciclo, 3, regionais["RS"], D("163"), D("199"))
+    definir_meta(indicador_taxa, ciclo, D("0.98"))
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    assert round(float(linha.valor) * 100, 1) == 92.3
+    assert linha.numerador == D("1185")
+    assert linha.denominador == D("1284")
+    # Taxa exige 100% em qualquer semana.
+    assert linha.esperado_pct == D("100")
 
 
-# --- atingimento ------------------------------------------------------
+def test_taxa_toma_a_semana_mais_recente_nao_a_soma(
+    db_session, ciclo, regionais, indicador_taxa, lancar, definir_meta
+):
+    lancar(indicador_taxa, ciclo, 1, regionais["SP"], D("90"), D("100"))
+    lancar(indicador_taxa, ciclo, 2, regionais["SP"], D("80"), D("100"))
+    lancar(indicador_taxa, ciclo, 3, regionais["SP"], D("95"), D("100"))
+    definir_meta(indicador_taxa, ciclo, D("0.98"))
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    assert linha.valor == D("0.95")  # a S3, nao 265/300
 
 
-def test_atingimento_quando_maior_e_melhor():
-    r = _atingimento_pct(Decimal("110"), Decimal("100"), MelhorDirecao.MAIOR)
-    assert r == pytest.approx(110)
+def test_semana_anterior_ignora_lancamentos_futuros(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    """Consultar a semana 2 deve mostrar o mundo como era na semana 2."""
+    for s, v in [(1, D("1.0")), (2, D("1.0")), (3, D("1.0"))]:
+        lancar(indicador_acumula, ciclo, s, regionais["SP"], v)
+    definir_meta(indicador_acumula, ciclo, D("4.0"))
+
+    linha_s2 = montar_painel(db_session, ciclo, semana=2)[0]
+    linha_s3 = montar_painel(db_session, ciclo, semana=3)[0]
+    assert linha_s2.valor == D("2.0")
+    assert linha_s3.valor == D("3.0")
+    assert linha_s2.esperado_pct == D("50")
+    assert linha_s3.esperado_pct == D("75")
 
 
-def test_atingimento_quando_menor_e_melhor_e_invertido():
-    """Regressao: inadimplencia de 4 contra meta 3 nao pode dar 133%.
+# --- abertura por regional --------------------------------------------
 
-    Pela razao direta daria 133% — numero alto que se le como bom
-    desempenho, quando a meta foi estourada. Invertido, da 75%.
+
+def test_regional_sem_meta_recebe_rateio_proporcional(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    """Sem meta propria, a regional e comparada com sua fatia do total.
+
+    Sem isso ela apareceria sem semaforo, escondendo a quebra.
     """
-    r = _atingimento_pct(Decimal("4"), Decimal("3"), MelhorDirecao.MENOR)
-    assert r == pytest.approx(75)
+    lancar(indicador_acumula, ciclo, 3, regionais["SP"], D("60"))
+    lancar(indicador_acumula, ciclo, 3, regionais["RJ"], D("30"))
+    lancar(indicador_acumula, ciclo, 3, regionais["RS"], D("10"))
+    definir_meta(indicador_acumula, ciclo, D("200"))
 
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    por_codigo = {r.regional_codigo: r for r in linha.regionais}
 
-def test_atingimento_menor_e_melhor_dentro_da_meta_passa_de_100():
-    r = _atingimento_pct(Decimal("3"), Decimal("4"), MelhorDirecao.MENOR)
-    assert r == pytest.approx(133.33, abs=0.01)
-
-
-@pytest.mark.parametrize("direcao", [MelhorDirecao.MAIOR, MelhorDirecao.MENOR])
-def test_acima_de_cem_por_cento_significa_sempre_bom(direcao):
-    """A leitura ">100% e bom" vale para as duas direcoes."""
-    if direcao is MelhorDirecao.MAIOR:
-        bom, ruim = Decimal("120"), Decimal("80")
-    else:
-        bom, ruim = Decimal("80"), Decimal("120")
-    meta = Decimal("100")
-    assert _atingimento_pct(bom, meta, direcao) > 100
-    assert _atingimento_pct(ruim, meta, direcao) < 100
-
-
-def test_atingimento_sem_meta_e_indefinido():
-    assert _atingimento_pct(Decimal("10"), None, MelhorDirecao.MAIOR) is None
-
-
-def test_atingimento_com_meta_zero_e_indefinido():
-    assert (
-        _atingimento_pct(Decimal("10"), Decimal("0"), MelhorDirecao.MAIOR) is None
+    # SP fez 60 de 100 realizados = 60% do peso -> meta rateada 120
+    assert por_codigo["SP"].meta == D("120")
+    assert por_codigo["RJ"].meta == D("60")
+    assert por_codigo["RS"].meta == D("20")
+    # Todas com o mesmo atingimento, porque o rateio segue o realizado.
+    assert all(
+        round(float(r.atingimento_pct)) == 50 for r in linha.regionais
     )
 
 
-def test_atingimento_com_valor_zero_e_indefinido():
-    """Valor zero seria divisao por zero no caso MENOR."""
-    assert (
-        _atingimento_pct(Decimal("0"), Decimal("5"), MelhorDirecao.MENOR) is None
+def test_taxa_nao_rateia_meta_entre_regionais(
+    db_session, ciclo, regionais, indicador_taxa, lancar, definir_meta
+):
+    """Uma taxa e exigida por inteiro de cada regional."""
+    lancar(indicador_taxa, ciclo, 3, regionais["SP"], D("95"), D("100"))
+    lancar(indicador_taxa, ciclo, 3, regionais["RS"], D("80"), D("100"))
+    definir_meta(indicador_taxa, ciclo, D("0.98"))
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    for r in linha.regionais:
+        if r.meta is not None:
+            assert r.meta == D("0.98")
+
+
+def test_meta_propria_da_regional_prevalece_sobre_o_rateio(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    lancar(indicador_acumula, ciclo, 3, regionais["SP"], D("50"))
+    lancar(indicador_acumula, ciclo, 3, regionais["RS"], D("50"))
+    definir_meta(indicador_acumula, ciclo, D("200"))
+    definir_meta(indicador_acumula, ciclo, D("40"), regional=regionais["RS"])
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    por_codigo = {r.regional_codigo: r for r in linha.regionais}
+    assert por_codigo["RS"].meta == D("40")
+    assert round(float(por_codigo["RS"].atingimento_pct)) == 125
+    # SP segue no rateio: 50% do realizado -> 100 de meta
+    assert por_codigo["SP"].meta == D("100")
+
+
+def test_regional_sem_lancamento_fica_sem_dado(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    lancar(indicador_acumula, ciclo, 3, regionais["SP"], D("100"))
+    definir_meta(indicador_acumula, ciclo, D("200"))
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    por_codigo = {r.regional_codigo: r for r in linha.regionais}
+    assert por_codigo["RS"].valor is None
+    assert por_codigo["RS"].semaforo is Semaforo.SEM_DADO
+
+
+# --- serie semanal ----------------------------------------------------
+
+
+def test_serie_traz_valor_da_semana_e_acumulado(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    for s, v in [(1, D("0.89")), (2, D("0.78")), (3, D("0.77"))]:
+        lancar(indicador_acumula, ciclo, s, regionais["SP"], v)
+    definir_meta(indicador_acumula, ciclo, D("3.70"))
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    assert [p.semana for p in linha.serie] == [1, 2, 3]
+    assert [p.valor for p in linha.serie] == [D("0.89"), D("0.78"), D("0.77")]
+    assert [p.valor_acumulado for p in linha.serie] == [
+        D("0.89"), D("1.67"), D("2.44"),
+    ]
+
+
+# --- projecao ---------------------------------------------------------
+
+
+def test_projecao_extrapola_o_ritmo(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    """2,44 mi em 3 semanas projeta 3,25 mi no fechamento (88% da meta)."""
+    for s, v in [(1, D("0.89")), (2, D("0.78")), (3, D("0.77"))]:
+        lancar(indicador_acumula, ciclo, s, regionais["SP"], v)
+    definir_meta(indicador_acumula, ciclo, D("3.70"))
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    p = linha.projecao
+    assert round(float(p.gap), 2) == 1.26
+    assert round(float(p.atingimento_projetado_pct)) == 88
+    assert p.semanas_restantes == 1
+    assert round(float(p.esforco_vs_ritmo), 2) == 1.55
+
+
+# --- pauta ------------------------------------------------------------
+
+
+def _criar_indicador(db, codigo, tipo, direcao, ordem):
+    ind = Indicador(
+        codigo=codigo, nome=codigo.title(), area="COMERCIAL", unidade="NUM",
+        tipo_acumulacao=tipo, melhor_direcao=direcao, ordem=ordem,
     )
+    db.add(ind)
+    db.commit()
+    db.refresh(ind)
+    return ind
 
 
-# --- montar_resumo ----------------------------------------------------
+def test_pauta_ordena_do_pior_desvio_para_o_melhor(
+    db_session, ciclo, regionais, lancar, definir_meta
+):
+    bom = _criar_indicador(db_session, "BOM", TipoAcumulacao.ACUMULA, MelhorDirecao.MAIOR, 1)
+    medio = _criar_indicador(db_session, "MEDIO", TipoAcumulacao.ACUMULA, MelhorDirecao.MAIOR, 2)
+    ruim = _criar_indicador(db_session, "RUIM", TipoAcumulacao.ACUMULA, MelhorDirecao.MAIOR, 3)
+
+    for ind, realizado in [(bom, D("80")), (medio, D("65")), (ruim, D("40"))]:
+        lancar(ind, ciclo, 3, regionais["SP"], realizado)
+        definir_meta(ind, ciclo, D("100"))
+
+    painel = montar_painel(db_session, ciclo, semana=3)
+    pauta = montar_pauta(painel)
+
+    # BOM esta a 80% contra 75% esperado: no ritmo, fora da pauta.
+    assert [i.linha.codigo for i in pauta] == ["RUIM", "MEDIO"]
+    assert [i.posicao for i in pauta] == [1, 2]
 
 
-def test_resumo_usa_a_medicao_mais_recente(db_session, indicador_maior):
-    (linha,) = montar_resumo(db_session)
-    assert linha.competencia == date(2026, 7, 1)
-    assert linha.valor == Decimal("1100.0000")
-    assert linha.valor_anterior == Decimal("1000.0000")
-    assert linha.variacao_pct == pytest.approx(10)
+def test_pauta_aponta_a_regional_mais_atrasada(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    lancar(indicador_acumula, ciclo, 3, regionais["SP"], D("60"))
+    lancar(indicador_acumula, ciclo, 3, regionais["RS"], D("10"))
+    definir_meta(indicador_acumula, ciclo, D("100"))
+    definir_meta(indicador_acumula, ciclo, D("50"), regional=regionais["SP"])
+    definir_meta(indicador_acumula, ciclo, D("50"), regional=regionais["RS"])
+
+    painel = montar_painel(db_session, ciclo, semana=3)
+    (item,) = montar_pauta(painel)
+    assert item.regional_critica.regional_codigo == "RS"
 
 
-def test_resumo_de_indicador_sem_medicao(db_session):
-    db_session.add(Indicador(codigo="VAZIO", nome="Sem dados"))
-    db_session.commit()
-
-    (linha,) = montar_resumo(db_session)
-    assert linha.competencia is None
-    assert linha.valor is None
-    assert linha.variacao_pct is None
-    assert linha.atingimento_pct is None
+def test_pauta_vazia_quando_tudo_no_ritmo(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    lancar(indicador_acumula, ciclo, 3, regionais["SP"], D("90"))
+    definir_meta(indicador_acumula, ciclo, D("100"))
+    painel = montar_painel(db_session, ciclo, semana=3)
+    assert montar_pauta(painel) == []
 
 
-def test_resumo_com_uma_unica_medicao_nao_tem_variacao(db_session):
-    ind = Indicador(codigo="UNICA", nome="Uma medicao")
-    db_session.add(ind)
-    db_session.flush()
-    db_session.add(
-        Medicao(indicador_id=ind.id, competencia=date(2026, 7, 1), valor=10)
-    )
-    db_session.commit()
-
-    (linha,) = montar_resumo(db_session)
-    assert linha.valor == Decimal("10.0000")
-    assert linha.valor_anterior is None
-    assert linha.variacao_pct is None
+# --- sintese por regional ---------------------------------------------
 
 
-def test_resumo_ignora_indicador_inativo(db_session, indicador_maior):
-    db_session.add(Indicador(codigo="OFF", nome="Desativado", ativo=False))
-    db_session.commit()
+def test_resumo_regional_classifica_por_quantidade_de_vermelhos(
+    db_session, ciclo, regionais, lancar, definir_meta
+):
+    """RS vermelho em 3 KPIs deve sair como CRITICO."""
+    for i in range(3):
+        ind = _criar_indicador(
+            db_session, f"KPI{i}", TipoAcumulacao.ACUMULA, MelhorDirecao.MAIOR, i
+        )
+        lancar(ind, ciclo, 3, regionais["SP"], D("80"))
+        lancar(ind, ciclo, 3, regionais["RS"], D("20"))
+        definir_meta(ind, ciclo, D("200"))
+        definir_meta(ind, ciclo, D("100"), regional=regionais["SP"])
+        definir_meta(ind, ciclo, D("100"), regional=regionais["RS"])
 
-    codigos = {linha.codigo for linha in montar_resumo(db_session)}
-    assert codigos == {"FAT"}
+    painel = montar_painel(db_session, ciclo, semana=3)
+    resumos = {r.regional_codigo: r for r in resumir_regionais(painel)}
+
+    assert resumos["RS"].status == "CRITICO"
+    assert resumos["RS"].vermelhos == 3
+    assert len(resumos["RS"].kpis_criticos) == 3
+    assert resumos["SP"].status == "NO_RITMO"
 
 
-def test_resumo_filtra_por_area(db_session, indicador_maior, indicador_menor):
-    todas = montar_resumo(db_session)
-    assert len(todas) == 2
+def test_resumo_ordena_a_pior_regional_primeiro(
+    db_session, ciclo, regionais, indicador_acumula, lancar, definir_meta
+):
+    lancar(indicador_acumula, ciclo, 3, regionais["SP"], D("90"))
+    lancar(indicador_acumula, ciclo, 3, regionais["RJ"], D("70"))
+    lancar(indicador_acumula, ciclo, 3, regionais["RS"], D("30"))
+    definir_meta(indicador_acumula, ciclo, D("300"))
+    for cod in ("SP", "RJ", "RS"):
+        definir_meta(indicador_acumula, ciclo, D("100"), regional=regionais[cod])
 
-    financeiro = montar_resumo(db_session, area="FINANCEIRO")
-    assert [linha.codigo for linha in financeiro] == ["INAD"]
+    painel = montar_painel(db_session, ciclo, semana=3)
+    ordem = [r.regional_codigo for r in resumir_regionais(painel)]
+    assert ordem == ["RS", "RJ", "SP"]
 
 
-def test_resumo_sem_indicador_devolve_lista_vazia(db_session):
-    assert montar_resumo(db_session) == []
+def test_painel_vazio_nao_quebra_as_visoes_derivadas(db_session, ciclo):
+    painel = montar_painel(db_session, ciclo, semana=1)
+    assert painel == []
+    assert montar_pauta(painel) == []
+    assert resumir_regionais(painel) == []

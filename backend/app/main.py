@@ -2,14 +2,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, indicadores
+from app.api import auth, painel
 from app.core.config import get_settings
 
 settings = get_settings()
 
 app = FastAPI(
     title="dir-dashboard — API",
-    description="Painel de gestao executiva. KAMI CO.",
+    description="Relatorio gerencial do comite executivo semanal. KAMI CO.",
     version="1.0.0",
     # Em producao a documentacao fica fechada.
     docs_url=None if settings.is_production else "/docs",
@@ -25,7 +25,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
-app.include_router(indicadores.router)
+app.include_router(painel.router)
 
 
 @app.get("/health", tags=["infra"])
