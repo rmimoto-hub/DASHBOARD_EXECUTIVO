@@ -14,7 +14,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.cadastro import Ciclo, Indicador, Regional, TipoAcumulacao
+from app.models.cadastro import Ciclo, Indicador, Regional
 from app.models.fatos import Medicao, Meta
 from app.services.kpi import (
     Projecao,
@@ -200,10 +200,23 @@ def _abertura_regional(
 ) -> list[LinhaRegional]:
     """O indicador aberto por regional — "onde esta a quebra".
 
-    Quando nao ha meta cadastrada para a regional, compara-se contra a
-    fatia proporcional da meta consolidada, usando o peso da regional no
-    realizado. Sem isso, uma regional sem meta propria apareceria sem
-    semaforo, escondendo justamente a quebra.
+    Sem meta cadastrada para a regional, cai-se num rateio da meta
+    consolidada. Se ratear ou nao depende de o valor ser ADITIVO ou uma
+    RAZAO — e nao do tipo de acumulacao:
+
+      sem denominador  valor aditivo (faturamento, clientes ativos,
+                       leads). A meta se rateia: somar as regionais tem
+                       de reproduzir o consolidado.
+      com denominador  razao (margem %, OTIF, inadimplencia). A meta NAO
+                       se rateia: 98% de OTIF e exigido de cada regional.
+
+    Comparar um estoque contra a meta consolidada produziria absurdos —
+    RS com 64 clientes ativos contra a meta de 448 da empresa daria 14%.
+
+    Aviso: o rateio pelo peso do realizado faz todas as regionais
+    exibirem o mesmo atingimento, o que apaga a quebra. E melhor que
+    nada para nao deixar a regional sem semaforo, mas o comite deve
+    cadastrar meta por regional — e isso que revela quem esta fora.
     """
     meta_consolidada = metas.get((ind.id, None))
 
@@ -215,17 +228,15 @@ def _abertura_regional(
         ]
         realizado[rid] = acumular(serie, ind.tipo_acumulacao) if serie else None
 
+    # O indicador e uma razao quando as medicoes trazem denominador.
+    eh_razao = any(
+        v.denominador is not None for v in realizado.values() if v is not None
+    )
+
     # Peso da regional, para ratear a meta consolidada quando preciso.
-    if ind.tipo_acumulacao is TipoAcumulacao.ACUMULA:
-        base = sum(
-            (v.numerador for v in realizado.values() if v is not None), Decimal(0)
-        )
-    else:
-        base = sum(
-            (v.denominador for v in realizado.values()
-             if v is not None and v.denominador is not None),
-            Decimal(0),
-        )
+    base = sum(
+        (v.numerador for v in realizado.values() if v is not None), Decimal(0)
+    )
 
     linhas: list[LinhaRegional] = []
     for rid, reg in sorted(regionais.items(), key=lambda kv: kv[1].ordem):
@@ -233,12 +244,12 @@ def _abertura_regional(
         meta_reg = metas.get((ind.id, rid))
 
         if meta_reg is None and meta_consolidada is not None and medido is not None:
-            if ind.tipo_acumulacao is TipoAcumulacao.TAXA:
-                # Uma taxa nao se rateia: a meta e a mesma para todos.
+            if eh_razao:
+                # Uma razao nao se rateia: exigida por inteiro de todos.
                 meta_reg = meta_consolidada
             elif base > 0:
-                peso = medido.numerador / base
-                meta_reg = meta_consolidada * peso
+                # Valor aditivo: rateia pelo peso da regional.
+                meta_reg = meta_consolidada * (medido.numerador / base)
 
         ating = atingimento(
             medido.valor if medido else None, meta_reg, ind.melhor_direcao
@@ -336,10 +347,17 @@ class ResumoRegionalCalc:
     kpis_criticos: list[str]
 
 
-# Quantos vermelhos bastam para a regional ser critica. Politica do
-# comite, exposta aqui em vez de escondida no meio do calculo.
-VERMELHOS_PARA_CRITICO = 3
-VERMELHOS_PARA_ATENCAO = 1
+# Classificacao da regional pelo DESVIO MEDIO do ritmo, em pontos
+# percentuais. Politica do comite, exposta aqui em vez de escondida no
+# meio do calculo.
+#
+# Contar vermelhos nao serve: quando um problema e estrutural da empresa
+# — estoque e inadimplencia fora da meta em toda parte — a regional mais
+# forte acumula tantos vermelhos quanto a mais fraca e todas viram
+# "criticas", apagando a diferenca. O desvio medio compara desempenho,
+# nao quantidade de problemas herdados.
+DESVIO_ATENCAO_PP = Decimal("-10")
+DESVIO_CRITICO_PP = Decimal("-25")
 
 
 def resumir_regionais(painel: list[LinhaPainel]) -> list[ResumoRegionalCalc]:
@@ -368,14 +386,19 @@ def resumir_regionais(painel: list[LinhaPainel]) -> list[ResumoRegionalCalc]:
     resumos: list[ResumoRegionalCalc] = []
     for codigo, acc in por_regional.items():
         vermelhos = acc["sem"].count(Semaforo.VERMELHO)
-        if vermelhos >= VERMELHOS_PARA_CRITICO:
+        desvios = acc["desvios"]
+        media = (
+            sum(desvios, Decimal(0)) / Decimal(len(desvios)) if desvios else None
+        )
+
+        if media is None:
+            status = "NO_RITMO"
+        elif media < DESVIO_CRITICO_PP:
             status = "CRITICO"
-        elif vermelhos >= VERMELHOS_PARA_ATENCAO:
+        elif media < DESVIO_ATENCAO_PP:
             status = "ATENCAO"
         else:
             status = "NO_RITMO"
-
-        desvios = acc["desvios"]
         resumos.append(
             ResumoRegionalCalc(
                 regional_codigo=codigo,
@@ -384,11 +407,7 @@ def resumir_regionais(painel: list[LinhaPainel]) -> list[ResumoRegionalCalc]:
                 ambares=acc["sem"].count(Semaforo.AMBAR),
                 vermelhos=vermelhos,
                 sem_dado=acc["sem"].count(Semaforo.SEM_DADO),
-                desvio_medio_pp=(
-                    sum(desvios, Decimal(0)) / Decimal(len(desvios))
-                    if desvios
-                    else None
-                ),
+                desvio_medio_pp=media,
                 status=status,
                 kpis_criticos=acc["criticos"],
             )

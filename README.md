@@ -2,8 +2,34 @@
 
 Painel de Gestão Executiva — KAMI CO.
 
-Indicadores gerenciais consolidados por área, com metas, variação mês a mês e
-percentual de atingimento.
+Relatório do comitê executivo semanal. 13 KPIs em 5 áreas, sempre abertos por
+regional (SP/RJ/RS), com semáforo contra o ritmo esperado da semana.
+
+A interface segue o ritual da reunião — as três perguntas, na mesma ordem:
+
+1. **Quanto já realizamos?** o valor no acumulado do mês, na unidade do KPI
+2. **Quanto isso representa da meta?** o anel de atingimento
+3. **Onde está a quebra?** a abertura por regional
+
+Duas classes de indicador determinam o que se espera na semana. Os que
+**acumulam** (faturamento, positivação, recuperação, leads) esperam
+semana÷total — 75% na semana 3 de 4. Os de **taxa** (margem, OTIF,
+inadimplência, tempo de entrega, cobertura) esperam 100% em qualquer semana.
+
+O semáforo compara o atingimento com esse ritmo esperado, **não** com 100% da
+meta do mês: verde no ritmo, âmbar até 10 p.p. abaixo, vermelho além disso.
+
+### Telas
+
+| Tela | O que responde |
+|---|---|
+| Painel | pauta ordenada pelo pior desvio + os 13 KPIs por área |
+| Onde está a quebra | matriz KPI × regional e a síntese de cada regional |
+| Detalhe | entregas com problema e concentração da inadimplência |
+| Compromissos | o que foi decidido, com responsável, prazo e KPI ligado |
+
+Clicar num KPI abre a evolução semanal, a abertura por regional e a projeção
+de fechamento.
 
 ---
 
@@ -51,7 +77,7 @@ make status
 make mysql-start     # sobe o MySQL local
 make install         # dependências de backend e frontend
 make db-schema       # cria o banco e aplica o schema
-make seed-fake       # carrega dados fictícios
+make seed-comite     # carrega um ciclo com dados fictícios
 make dev             # sobe backend e frontend
 ```
 
@@ -83,10 +109,10 @@ Rode `make help` para a lista completa. Os principais:
 | `make dev`            | sobe backend e frontend juntos                 |
 | `make dev-backend`    | sobe só a API                                  |
 | `make dev-frontend`   | sobe só o painel                               |
-| `make seed-fake`      | carrega dados fictícios (idempotente)          |
+| `make seed-comite`    | carrega um ciclo do comitê (idempotente)       |
 | `make db-schema`      | aplica `database/schema.sql`                   |
 | `make db-reset`       | **apaga** e recria o banco (pede confirmação)  |
-| `make test`           | testes do backend (58 testes, sem MySQL)       |
+| `make test`           | testes do backend (91 testes, sem MySQL)       |
 | `make check`          | testes + lint + verificação de segurança       |
 | `make security-check` | verificação obrigatória antes do push          |
 | `make build`          | build de produção do frontend                  |

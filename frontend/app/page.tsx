@@ -1,157 +1,154 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 
-import { CartaoIndicador } from "@/components/CartaoIndicador";
-import {
-  ErroApi,
-  buscarResumo,
-  buscarUsuarioLogado,
-  lerToken,
-  limparToken,
-  type ResumoIndicador,
-  type Usuario,
-} from "@/lib/api";
+import { Cabecalho } from "@/components/Cabecalho";
+import { CartaoKpi } from "@/components/CartaoKpi";
+import { Carregando, Erro, Vazio } from "@/components/Estados";
+import { Pastilha } from "@/components/Semaforo";
+import { buscarNotas, buscarPainel, buscarPauta } from "@/lib/api";
+import { formatarPP, rotuloArea } from "@/lib/formato";
+import { usePagina } from "@/lib/sessao";
+
+const ORDEM_AREAS = [
+  "COMERCIAL",
+  "OPERACOES",
+  "ESTOQUE",
+  "FINANCEIRO",
+  "MARKETING",
+];
 
 export default function Painel() {
-  const router = useRouter();
-  const [usuario, setUsuario] = useState<Usuario | null>(null);
-  const [itens, setItens] = useState<ResumoIndicador[]>([]);
-  const [area, setArea] = useState<string>("");
-  const [carregando, setCarregando] = useState(true);
-  const [erro, setErro] = useState<string | null>(null);
+  const { usuario, dados, carregando, erro } = usePagina(async () => {
+    const [painel, pauta, notas] = await Promise.all([
+      buscarPainel(),
+      buscarPauta(),
+      buscarNotas(),
+    ]);
+    return { painel, pauta, notas };
+  });
 
-  useEffect(() => {
-    if (!lerToken()) {
-      router.replace("/login");
-      return;
-    }
+  if (carregando) return <Carregando texto="Carregando o painel…" />;
+  if (erro) return <Erro mensagem={erro} />;
+  if (!dados) return null;
 
-    let cancelado = false;
+  const { painel, pauta, notas } = dados;
+  const notaGeral = notas.find((n) => n.indicador_codigo === null);
 
-    (async () => {
-      try {
-        const [u, resumo] = await Promise.all([
-          buscarUsuarioLogado(),
-          buscarResumo(),
-        ]);
-        if (cancelado) return;
-        setUsuario(u);
-        setItens(resumo);
-      } catch (e) {
-        if (cancelado) return;
-        // Token expirado ou invalido: volta para o login.
-        if (e instanceof ErroApi && e.status === 401) {
-          limparToken();
-          router.replace("/login");
-          return;
-        }
-        setErro(e instanceof Error ? e.message : "Falha ao carregar o painel");
-      } finally {
-        if (!cancelado) setCarregando(false);
-      }
-    })();
+  const porArea = ORDEM_AREAS.map((area) => ({
+    area,
+    linhas: painel.linhas.filter((l) => l.area === area),
+  })).filter((g) => g.linhas.length > 0);
 
-    return () => {
-      cancelado = true;
-    };
-  }, [router]);
-
-  function sair() {
-    limparToken();
-    router.replace("/login");
-  }
-
-  const areas = Array.from(new Set(itens.map((i) => i.area))).sort();
-  const visiveis = area ? itens.filter((i) => i.area === area) : itens;
-
-  if (carregando) {
-    return (
-      <main className="grid min-h-screen place-items-center">
-        <p className="text-slate-500">Carregando painel…</p>
-      </main>
-    );
-  }
+  const contagem = {
+    verde: painel.linhas.filter((l) => l.semaforo === "VERDE").length,
+    ambar: painel.linhas.filter((l) => l.semaforo === "AMBAR").length,
+    vermelho: painel.linhas.filter((l) => l.semaforo === "VERMELHO").length,
+  };
 
   return (
-    <main className="mx-auto max-w-7xl px-6 py-8">
-      <header className="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-kami">
-            Painel de Gestao Executiva
-          </h1>
-          <p className="mt-1 text-sm text-slate-500">
-            {usuario ? `${usuario.nome} · ${usuario.perfil}` : ""}
-          </p>
-        </div>
-        <button
-          onClick={sair}
-          className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 transition hover:bg-slate-100"
-        >
-          Sair
-        </button>
-      </header>
+    <>
+      <Cabecalho
+        ciclo={painel.ciclo}
+        semana={painel.semana}
+        usuario={usuario}
+      />
 
-      {erro && (
-        <div
-          role="alert"
-          className="mb-6 rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
-        >
-          {erro}
-        </div>
-      )}
-
-      {areas.length > 0 && (
-        <nav className="mb-6 flex flex-wrap gap-2">
-          <FiltroArea rotulo="Todas" ativo={area === ""} onClick={() => setArea("")} />
-          {areas.map((a) => (
-            <FiltroArea
-              key={a}
-              rotulo={a}
-              ativo={area === a}
-              onClick={() => setArea(a)}
-            />
-          ))}
-        </nav>
-      )}
-
-      {visiveis.length === 0 ? (
-        <p className="rounded border border-dashed border-slate-300 px-4 py-12 text-center text-slate-500">
-          Nenhum indicador cadastrado. Rode <code>make seed-fake</code> para
-          carregar dados de teste.
-        </p>
-      ) : (
-        <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {visiveis.map((item) => (
-            <CartaoIndicador key={item.codigo} item={item} />
-          ))}
+      <main className="mx-auto max-w-[1600px] px-6 py-6">
+        {/* Resumo em uma linha: quantos KPIs em cada estado */}
+        <section className="mb-6 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-slate-200 bg-white px-5 py-3 text-sm">
+          <span className="font-medium text-slate-700">
+            {painel.linhas.length} indicadores
+          </span>
+          <span className="flex items-center gap-1.5 text-emerald-700">
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+            {contagem.verde} no ritmo
+          </span>
+          <span className="flex items-center gap-1.5 text-amber-700">
+            <span className="h-2.5 w-2.5 rounded-full bg-amber-500" />
+            {contagem.ambar} em atenção
+          </span>
+          <span className="flex items-center gap-1.5 text-red-700">
+            <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
+            {contagem.vermelho} fora do ritmo
+          </span>
+          <span className="ml-auto text-xs text-slate-400">
+            ritmo esperado na semana {painel.semana}:{" "}
+            {Math.round(Number(painel.esperado_acumula_pct))}% para
+            indicadores que acumulam, 100% para taxas
+          </span>
         </section>
-      )}
-    </main>
-  );
-}
 
-function FiltroArea({
-  rotulo,
-  ativo,
-  onClick,
-}: {
-  rotulo: string;
-  ativo: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      aria-pressed={ativo}
-      className={`rounded-full px-4 py-1.5 text-sm transition ${
-        ativo
-          ? "bg-kami text-white"
-          : "border border-slate-300 text-slate-600 hover:bg-slate-100"
-      }`}
-    >
-      {rotulo}
-    </button>
+        {notaGeral && (
+          <p className="mb-6 border-l-2 border-kami bg-slate-50 px-4 py-3 text-sm text-slate-700">
+            {notaGeral.texto}
+          </p>
+        )}
+
+        {/* Pauta sugerida — por onde a reuniao comeca */}
+        <section className="mb-8">
+          <h2 className="mb-1 text-base font-semibold text-slate-800">
+            Pauta sugerida
+          </h2>
+          <p className="mb-3 text-xs text-slate-500">
+            Indicadores fora do ritmo, do maior desvio para o menor. A ação é
+            sobre a regional apontada, não sobre a média.
+          </p>
+
+          {pauta.itens.length === 0 ? (
+            <Vazio>Nenhum indicador fora do ritmo nesta semana.</Vazio>
+          ) : (
+            <ol className="divide-y divide-slate-100 overflow-hidden rounded-lg border border-slate-200 bg-white">
+              {pauta.itens.map((item) => (
+                <li key={item.codigo}>
+                  <Link
+                    href={`/kpi/${item.codigo}`}
+                    className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3 text-sm transition hover:bg-slate-50"
+                  >
+                    <span className="w-5 shrink-0 text-right tabular-nums text-slate-400">
+                      {item.posicao}
+                    </span>
+                    <Pastilha semaforo={item.semaforo} />
+                    <span className="min-w-0 flex-1 font-medium text-slate-800">
+                      {item.nome}
+                    </span>
+                    <span className="text-xs text-slate-400">
+                      {rotuloArea(item.area)}
+                    </span>
+                    <span className="tabular-nums text-slate-600">
+                      {item.atingimento_pct === null
+                        ? "—"
+                        : `${Math.round(Number(item.atingimento_pct))}%`}
+                    </span>
+                    <span className="w-20 text-right font-medium tabular-nums text-red-700">
+                      {formatarPP(item.desvio_pp)}
+                    </span>
+                    <span className="w-32 text-right text-xs text-slate-500">
+                      {item.regional_critica
+                        ? `pior: ${item.regional_critica} (${formatarPP(item.desvio_regional_pp)})`
+                        : ""}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ol>
+          )}
+        </section>
+
+        {/* Painel geral por area */}
+        {porArea.map((grupo) => (
+          <section key={grupo.area} className="mb-8">
+            <h2 className="mb-3 text-base font-semibold text-slate-800">
+              {rotuloArea(grupo.area)}
+            </h2>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {grupo.linhas.map((linha) => (
+                <CartaoKpi key={linha.codigo} linha={linha} />
+              ))}
+            </div>
+          </section>
+        ))}
+      </main>
+    </>
   );
 }

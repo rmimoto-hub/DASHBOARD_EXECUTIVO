@@ -251,10 +251,15 @@ def test_pauta_vazia_quando_tudo_no_ritmo(
 # --- sintese por regional ---------------------------------------------
 
 
-def test_resumo_regional_classifica_por_quantidade_de_vermelhos(
+def test_resumo_regional_classifica_pelo_desvio_medio(
     db_session, ciclo, regionais, lancar, definir_meta
 ):
-    """RS vermelho em 3 KPIs deve sair como CRITICO."""
+    """RS muito atras do ritmo sai CRITICO; SP no ritmo sai NO_RITMO.
+
+    Regressao: a versao anterior contava vermelhos, e por isso
+    classificava SP como critica quando havia problemas estruturais da
+    empresa — todas as regionais acumulavam vermelhos herdados.
+    """
     for i in range(3):
         ind = _criar_indicador(
             db_session, f"KPI{i}", TipoAcumulacao.ACUMULA, MelhorDirecao.MAIOR, i
@@ -294,3 +299,96 @@ def test_painel_vazio_nao_quebra_as_visoes_derivadas(db_session, ciclo):
     assert painel == []
     assert montar_pauta(painel) == []
     assert resumir_regionais(painel) == []
+
+
+# --- regra de rateio: aditivo vs razao --------------------------------
+
+
+def test_estoque_sem_denominador_rateia_a_meta(
+    db_session, ciclo, regionais, lancar, definir_meta
+):
+    """Regressao: base ativa comparada contra a meta consolidada dava 14%.
+
+    Clientes ativos e um valor aditivo, ainda que o indicador seja TAXA
+    para efeito de ritmo esperado. A meta consolidada precisa ser
+    rateada, senao RS com 64 clientes e cobrada dos 448 da empresa.
+    """
+    ind = Indicador(
+        codigo="BASE_ATIVA", nome="Base ativa", area="COMERCIAL",
+        unidade="CLIENTES", tipo_acumulacao=TipoAcumulacao.TAXA,
+        melhor_direcao=MelhorDirecao.MAIOR, ordem=1,
+    )
+    db_session.add(ind)
+    db_session.commit()
+
+    lancar(ind, ciclo, 3, regionais["SP"], D("220"))
+    lancar(ind, ciclo, 3, regionais["RJ"], D("110"))
+    lancar(ind, ciclo, 3, regionais["RS"], D("64"))
+    definir_meta(ind, ciclo, D("448"))
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    por_codigo = {r.regional_codigo: r for r in linha.regionais}
+
+    # Cada regional cobrada da sua fatia, nao dos 448 da empresa.
+    assert all(r.meta < D("448") for r in linha.regionais)
+    assert sum(r.meta for r in linha.regionais) == D("448")
+    # Sem meta propria o rateio segue o realizado, logo o atingimento
+    # e o mesmo — o consolidado de 394 sobre 448.
+    assert round(float(por_codigo["RS"].atingimento_pct)) == 88
+    assert por_codigo["RS"].atingimento_pct > D("80")
+
+
+def test_razao_com_denominador_nao_rateia_a_meta(
+    db_session, ciclo, regionais, indicador_taxa, lancar, definir_meta
+):
+    """OTIF de 98% e exigido de cada regional, nao rateado entre elas."""
+    lancar(indicador_taxa, ciclo, 3, regionais["SP"], D("706"), D("738"))
+    lancar(indicador_taxa, ciclo, 3, regionais["RS"], D("163"), D("199"))
+    definir_meta(indicador_taxa, ciclo, D("0.98"))
+
+    (linha,) = montar_painel(db_session, ciclo, semana=3)
+    com_meta = [r for r in linha.regionais if r.meta is not None]
+    assert com_meta
+    assert all(r.meta == D("0.98") for r in com_meta)
+
+
+def test_problema_estrutural_nao_torna_toda_regional_critica(
+    db_session, ciclo, regionais, lancar, definir_meta
+):
+    """Regressao: contar vermelhos classificava SP como critica.
+
+    Cenario: 4 KPIs em que a empresa toda esta fora da meta (estoque,
+    inadimplencia) mais 2 em que SP vai bem. Contando vermelhos, SP teria
+    4 e seria "critica" igual a RS. Pelo desvio medio, SP fica no ritmo.
+    """
+    # KPIs estruturalmente ruins: todas as regionais longe da meta.
+    for i in range(4):
+        ind = _criar_indicador(
+            db_session, f"ESTRUT{i}", TipoAcumulacao.TAXA, MelhorDirecao.MAIOR, i
+        )
+        for cod, valor in (("SP", D("70")), ("RJ", D("60")), ("RS", D("40"))):
+            lancar(ind, ciclo, 3, regionais[cod], valor, D("100"))
+        definir_meta(ind, ciclo, D("0.95"))
+
+    # KPIs em que SP vai muito bem e RS muito mal.
+    for i in range(2):
+        ind = _criar_indicador(
+            db_session, f"BOM{i}", TipoAcumulacao.ACUMULA, MelhorDirecao.MAIOR, 10 + i
+        )
+        lancar(ind, ciclo, 3, regionais["SP"], D("110"))
+        lancar(ind, ciclo, 3, regionais["RJ"], D("80"))
+        lancar(ind, ciclo, 3, regionais["RS"], D("30"))
+        definir_meta(ind, ciclo, D("300"))
+        for cod in ("SP", "RJ", "RS"):
+            definir_meta(ind, ciclo, D("100"), regional=regionais[cod])
+
+    resumos = {r.regional_codigo: r for r in resumir_regionais(
+        montar_painel(db_session, ciclo, semana=3)
+    )}
+
+    # Todas herdam vermelhos dos KPIs estruturais...
+    assert resumos["SP"].vermelhos >= 4
+    # ...mas a classificacao separa desempenho de problema herdado.
+    assert resumos["RS"].status == "CRITICO"
+    assert resumos["SP"].status != "CRITICO"
+    assert resumos["SP"].desvio_medio_pp > resumos["RS"].desvio_medio_pp

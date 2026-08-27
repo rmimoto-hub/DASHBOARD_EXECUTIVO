@@ -19,7 +19,8 @@ FRONTEND   := frontend
 
 .DEFAULT_GOAL := help
 .PHONY: help install install-backend install-frontend dev dev-backend \
-        dev-frontend db-create db-schema db-reset seed-fake security-check \
+        dev-frontend db-create db-schema db-reset seed-fake seed-comite \
+        security-check \
         build lint test check mysql-start mysql-stop status
 
 ## help: mostra esta lista
@@ -91,9 +92,12 @@ db-reset:
 	   "DROP DATABASE IF EXISTS $(DB_NAME);"
 	@$(MAKE) --no-print-directory db-schema
 
-## seed-fake: carrega dados ficticios para testes
-seed-fake:
-	@$(ACTIVATE) && cd $(BACKEND) && python -m scripts.seed_fake
+## seed-comite: carrega um ciclo completo do comite (dados ficticios)
+seed-comite:
+	@$(ACTIVATE) && cd $(BACKEND) && python -m scripts.seed_comite
+
+## seed-fake: apelido de seed-comite, mantido pelo padrao KAMI CO.
+seed-fake: seed-comite
 
 # ---------------------------------------------------------------------
 # Desenvolvimento
